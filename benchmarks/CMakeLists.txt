@@ -1,6 +1,7 @@
 # Copyright (C) 2023 Intel Corporation
 # SPDX-License-Identifier: BSD-3-Clause
 find_package(MPI REQUIRED)
+find_package(oneCCL REQUIRED)
 
 if(BUILD_TORCH_BENCHMARK)
     set(LIBTORCH_DIR "${PROJECT_SOURCE_DIR}/extern/libtorch/share/cmake/")
@@ -8,21 +9,24 @@ if(BUILD_TORCH_BENCHMARK)
 
     find_package(IPEX REQUIRED)
     find_package(IntelSYCL REQUIRED)
-
+    message("adding benchmark-training-torch executable")
     add_executable(benchmark-training-torch benchmark_training_torch.cpp)
     add_sycl_to_target(TARGET benchmark-training-torch SOURCES benchmark_training_torch.cpp)
     target_link_libraries(benchmark-training-torch PRIVATE network ${MPI_CXX_LIBRARIES} ${TORCH_IPEX_LIBRARIES})
-    target_include_directories(benchmark-training-torch PRIVATE "${PROJECT_SOURCE_DIR}/include/")
+    target_link_libraries(benchmark-training-torch PRIVATE  ccl sycl)
+    target_include_directories(benchmark-training-torch PRIVATE "${PROJECT_SOURCE_DIR}/include/" "${PROJECT_SOURCE_DIR}/include/oneapi")
 
     add_executable(benchmark-inference-torch benchmark_inference_torch.cpp)
     add_sycl_to_target(TARGET benchmark-inference-torch SOURCES benchmark_inference_torch.cpp)
     target_link_libraries(benchmark-inference-torch PRIVATE network ${MPI_CXX_LIBRARIES} ${TORCH_IPEX_LIBRARIES})
-    target_include_directories(benchmark-inference-torch PRIVATE "${PROJECT_SOURCE_DIR}/include/")
+    target_link_libraries(benchmark-inference-torch PRIVATE  ccl sycl)
+    target_include_directories(benchmark-inference-torch PRIVATE "${PROJECT_SOURCE_DIR}/include/" "${PROJECT_SOURCE_DIR}/include/oneapi")
 
     add_executable(benchmark-all-torch benchmark_all_torch.cpp)
     add_sycl_to_target(TARGET benchmark-all-torch SOURCES benchmark_all_torch.cpp)
     target_link_libraries(benchmark-all-torch PRIVATE network ${MPI_CXX_LIBRARIES} ${TORCH_IPEX_LIBRARIES})
-    target_include_directories(benchmark-all-torch PRIVATE "${PROJECT_SOURCE_DIR}/include/")
+    target_link_libraries(benchmark-all-torch PRIVATE  ccl sycl)
+    target_include_directories(benchmark-all-torch PRIVATE "${PROJECT_SOURCE_DIR}/include/" "${PROJECT_SOURCE_DIR}/include/oneapi")
 else()
     find_package(IntelSYCL REQUIRED)
 endif()
@@ -32,13 +36,19 @@ add_executable(benchmark-inference benchmark_inference.cpp)
 add_sycl_to_target(TARGET benchmark-inference SOURCES benchmark_inference.cpp)
 target_link_libraries(benchmark-inference PRIVATE network ${MPI_CXX_LIBRARIES})
 #target_precompile_headers(benchmark-inference REUSE_FROM network)
+target_link_libraries(benchmark-inference PRIVATE ccl sycl)
 
 add_executable(benchmark-training benchmark_training.cpp)
 add_sycl_to_target(TARGET benchmark-training SOURCES benchmark_training.cpp)
 target_link_libraries(benchmark-training PRIVATE network ${MPI_CXX_LIBRARIES})
-target_include_directories(benchmark-training PRIVATE "${PROJECT_SOURCE_DIR}/include/")
+target_link_libraries(benchmark-training PRIVATE ccl sycl)
+target_include_directories(benchmark-training PRIVATE "${PROJECT_SOURCE_DIR}/include/" "${PROJECT_SOURCE_DIR}/include/oneapi")
 
 add_executable(benchmark-all benchmark_all.cpp)
 add_sycl_to_target(TARGET benchmark-all SOURCES benchmark_all.cpp)
 target_link_libraries(benchmark-all PRIVATE network ${MPI_CXX_LIBRARIES})
-target_include_directories(benchmark-all PRIVATE "${PROJECT_SOURCE_DIR}/include/")
+target_link_libraries(benchmark-all PRIVATE ccl sycl)
+
+target_include_directories(benchmark-inference PRIVATE "${PROJECT_SOURCE_DIR}/include/" "${PROJECT_SOURCE_DIR}/include/oneapi")
+target_include_directories(benchmark-all PRIVATE "${PROJECT_SOURCE_DIR}/include/" "${PROJECT_SOURCE_DIR}/include/oneapi")
+#target_include_directories(benchmark-all PRIVATE "${PROJECT_SOURCE_DIR}/include/")

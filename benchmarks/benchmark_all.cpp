@@ -8,18 +8,22 @@
 #include "benchmark_training.h"
 #include "mpi.h"
 
+#include "ccl.hpp"
+#include "../include/sycl_base.hpp"
+
 using bf16 = sycl::ext::oneapi::bfloat16;
 
 template <typename T, int WIDTH>
 void benchmark_training_and_inference(const size_t batch_size, const int n_hidden_layers, const int n_iterations,
-                                      sycl::queue &q, double &gflops_training, double &gflops_inference) {
-    gflops_training = benchmark_training<T, WIDTH>(batch_size, n_hidden_layers, n_iterations, q);
+                                      sycl::queue &q, double &gflops_training, double &gflops_inference, ccl::communicator& comm, int rank) {
+    gflops_training = benchmark_training<T, WIDTH>(batch_size, n_hidden_layers, n_iterations, q, comm, rank);
     q.wait();
-    gflops_inference = benchmark_inference<T, WIDTH>(batch_size, n_hidden_layers, n_iterations, q);
-    q.wait();
+    //gflops_inference = benchmark_inference<T, WIDTH>(batch_size, n_hidden_layers, n_iterations, q, comm, rank);
+    //q.wait();
+
 }
 
-template <typename T, int WIDTH> void benchmark_all(sycl::queue &q, int test_over_batch_size = 0) {
+template <typename T, int WIDTH> void benchmark_all(ccl::communicator& comm, sycl::queue &q, int test_over_batch_size = 0) {
     int n_hidden_layers = 4;
     int iterations = 100;
     int batch_size;
@@ -28,6 +32,7 @@ template <typename T, int WIDTH> void benchmark_all(sycl::queue &q, int test_ove
     int world_rank, size;
     MPI_Comm_rank(MPI_COMM_WORLD, &world_rank);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
+
     double gflops_training, gflops_inference;
     int batch_size_offset =
         1 - size; // if MPI size is 2 (2 tiles on PVC), then we need to run 2^(batch_size + batch_size_offset) per tile
@@ -41,7 +46,7 @@ template <typename T, int WIDTH> void benchmark_all(sycl::queue &q, int test_ove
         for (int power = 10; power < 22; power++) {
             batch_size = 1 << (power + batch_size_offset);
             benchmark_training_and_inference<T, WIDTH>(batch_size, n_hidden_layers, iterations, q, gflops_training,
-                                                       gflops_inference);
+                                                       gflops_inference, comm, world_rank);
 
             // Collect the performance data instead of printing it directly
             perf_data.push_back({power, gflops_training, gflops_inference});
@@ -60,7 +65,7 @@ template <typename T, int WIDTH> void benchmark_all(sycl::queue &q, int test_ove
                 << std::endl;
         }
         benchmark_training_and_inference<T, WIDTH>(batch_size, n_hidden_layers, iterations, q, gflops_training,
-                                                   gflops_inference);
+                                                   gflops_inference, comm, world_rank);
 
         // Collect the performance data instead of printing it directly
         perf_data.push_back({batch_size, gflops_training, gflops_inference});
@@ -75,7 +80,7 @@ template <typename T, int WIDTH> void benchmark_all(sycl::queue &q, int test_ove
                       << std::endl;
         }
         benchmark_training_and_inference<T, WIDTH>(batch_size, n_hidden_layers, iterations, q, gflops_training,
-                                                   gflops_inference);
+                                                   gflops_inference, comm, world_rank);
 
         // Collect the performance data instead of printing it directly
         perf_data.push_back({batch_size, gflops_training, gflops_inference});
@@ -87,7 +92,7 @@ template <typename T, int WIDTH> void benchmark_all(sycl::queue &q, int test_ove
         batch_size =
             1 << (17 + batch_size_offset); // batch size one less, because MPI does 2 tiles, thus half batch size.
         benchmark_training_and_inference<T, WIDTH>(batch_size, n_hidden_layers, iterations, q, gflops_training,
-                                                   gflops_inference);
+                                                   gflops_inference, comm, world_rank);
 
         // Collect the performance data instead of printing it directly
         perf_data.push_back({batch_size, gflops_training, gflops_inference});
@@ -99,7 +104,7 @@ template <typename T, int WIDTH> void benchmark_all(sycl::queue &q, int test_ove
         batch_size =
             1 << (20 + batch_size_offset); // batch size one less, because MPI does 2 tiles, thus half batch size.
         benchmark_training_and_inference<T, WIDTH>(batch_size, n_hidden_layers, iterations, q, gflops_training,
-                                                   gflops_inference);
+                                                   gflops_inference, comm, world_rank);
         // Collect the performance data instead of printing it directly
         perf_data.push_back({batch_size, gflops_training, gflops_inference});
     }
@@ -153,10 +158,46 @@ template <typename T, int WIDTH> void benchmark_all(sycl::queue &q, int test_ove
         }
     }
 }
-int main() {
+
+int main(int argc, char *argv[]) {
+    const size_t count = 10 * 1024 * 1024;
+
     try {
+        ccl::init();
+
         MPI_Init(NULL, NULL);
-        sycl::queue q(sycl::gpu_selector_v);
+        int world_rank, size;
+        MPI_Comm_rank(MPI_COMM_WORLD, &world_rank);
+        MPI_Comm_size(MPI_COMM_WORLD, &size);
+
+        sycl::queue q;
+        if (!create_sycl_queue(argc, argv, world_rank, q)) {
+            return -1;
+        }
+
+        /* create kvs */
+        ccl::shared_ptr_class<ccl::kvs> kvs;
+        ccl::kvs::address_type main_addr;
+        if (world_rank == 0) {
+            kvs = ccl::create_main_kvs();
+            main_addr = kvs->get_address();
+            MPI_Bcast((void *)main_addr.data(), main_addr.size(), MPI_BYTE, 0, MPI_COMM_WORLD);
+        }
+        else {
+            MPI_Bcast((void *)main_addr.data(), main_addr.size(), MPI_BYTE, 0, MPI_COMM_WORLD);
+            kvs = ccl::create_kvs(main_addr);
+        }
+
+        /* create communicator */
+        auto dev = ccl::create_device(q.get_device());
+        auto ctx = ccl::create_context(q.get_context());
+        auto comm = ccl::create_communicator(size, world_rank, dev, ctx, kvs);
+
+        /* create buffers */
+        //sycl::buffer<int> send_buf(count);
+        //sycl::buffer<int> recv_buf(count);
+        
+        //sycl::queue q(sycl::gpu_selector_v);
         // ----------Benchmark for different workloads----------
 
         // std::cout << "Sycl::half, width 16" << std::endl;
@@ -179,17 +220,20 @@ int main() {
         // benchmark_all<sycl::half, 32>(q, 1);
 
         std::cout << "Sycl::half, width 64" << std::endl;
-        benchmark_all<sycl::half, 64>(q, 1);
+        benchmark_all<sycl::half, 64>(comm, q, 1);
 
         // std::cout << "Sycl::half, width 128" << std::endl;
         // benchmark_all<sycl::half, 128>(q, 1);
+        MPI_Barrier(MPI_COMM_WORLD); // Synchronize before finalizing MPI
         MPI_Finalize();
 
     } catch (const std::exception &e) {
         std::cerr << e.what() << '\n';
+        MPI_Finalize();
         return 1;
     } catch (...) {
         std::cout << "Caught some undefined exception." << std::endl;
+        MPI_Finalize();
         return 2;
     }
 

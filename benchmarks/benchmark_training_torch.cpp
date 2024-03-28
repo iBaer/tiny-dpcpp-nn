@@ -15,21 +15,23 @@
 
 #include "benchmark_training_torch.h"
 #include "mpi.h"
+#include "ccl.hpp"
 
 using bf16 = sycl::ext::oneapi::bfloat16;
 
 int main() {
     try {
+        ccl::init();
         MPI_Init(NULL, NULL);
-        benchmark_training<bf16, 16>(1 << 3, 4, 2);
+        //benchmark_training<bf16, 16>(1 << 3, 4, 2);
 
-        benchmark_training<bf16, 64>(1 << 22, 4, 100);
+         benchmark_training<bf16, 64>(1 << 22, 4, 100);
 
-        benchmark_training<sycl::half, 64>(1 << 22, 4, 100);
+        // benchmark_training<sycl::half, 64>(1 << 22, 4, 100);
 
-        benchmark_training<bf16, 32>(1 << 22, 4, 100);
+        // benchmark_training<bf16, 32>(1 << 22, 4, 100);
 
-        benchmark_training<bf16, 16>(1 << 22, 4, 100);
+        // benchmark_training<bf16, 16>(1 << 22, 4, 100);
 
         for (int iter = 10; iter < 24; iter++) {
             benchmark_training<bf16, 64>(1 << iter, 4, 100);
