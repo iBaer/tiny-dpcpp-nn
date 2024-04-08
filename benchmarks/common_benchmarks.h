@@ -72,6 +72,17 @@ void WritePerformanceData(const int n_iterations, const double time, const doubl
     std::cout << "Throughput =\t\t" << tp << " \tGflops/s" << std::endl;
 }
 
+void WritePerformanceDataCSV(const int n_iterations, const double time, const double oi, const double bw,
+                          const double tp, const size_t batch_size, const int world_size) {
+    std::string filename = "performance_data_" + std::to_string(world_size) + "_ranks.csv";
+    std::ofstream file(filename, std::ios::app);
+
+    // Write the data to the file, including the batch size
+    file << batch_size << "," << n_iterations << "," << time << "," << oi << "," << bw << "," << tp << std::endl;
+
+    file.close();
+}
+
 // TODO: consolidate WritePerformanceData inference and training and just write functions
 // which return the corresponding flops and byte
 double WritePerformanceDataInference(std::chrono::time_point<std::chrono::steady_clock> begin,
@@ -132,6 +143,8 @@ double WritePerformanceDataTraining(std::chrono::time_point<std::chrono::steady_
         const double oi = flops / bytes_loaded_and_stored;
 
         WritePerformanceData(n_iterations, elapsed_time * 1.0e-9, oi, hbm_bandwidth_GB_per_s, gflops_per_s);
+        WritePerformanceDataCSV(n_iterations, elapsed_time * 1.0e-9, oi, hbm_bandwidth_GB_per_s, gflops_per_s, batch_size, world_size);
+
         // Return the gflops_per_s value instead of void.
     }
 

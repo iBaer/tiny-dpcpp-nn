@@ -65,21 +65,48 @@ double benchmark_training(const size_t batch_size, const int n_hidden_layers, co
 
     /* create stream */
     auto stream = ccl::create_stream(network.get_queue());
+    ccl::datatype dtype = get_ccl_datatype<T>(); //data.scalar_type()
+    auto attr = ccl::create_operation_attr<ccl::allreduce_attr>();
 
     tinydpcppnn::benchmarks::common::WriteBenchmarkHeader("Training (forw+backw, no opt, no loss)", batch_size, WIDTH,
                                                           n_hidden_layers, sizeof(T), type_to_string<T>(),
                                                           network.get_queue());
 
-    size_t local_batch_size = batch_size;
-    if(size > 1) {
-        int batch_size_offset =
-            1 - size; // if MPI size is 2 (2 tiles on PVC), then we need to run 2^(batch_size + batch_size_offset) per tile
-        local_batch_size = batch_size >> -1*batch_size_offset; // Reduce batch size by powers of 2 (equivalent to dividing by 2); need to check for inputs not given as 2^x
-        if(world_rank == 0)
-            std::cout << "MPI size: " << size << ", thus batch size on each MPI rank: " << batch_size_offset << " => " << batch_size << " => " << local_batch_size << std::endl;
+    size_t local_batch_size = batch_size / size;
+    // TODO: For simpliity, enforce that batch size is a power of 2
+    if ((local_batch_size & (local_batch_size - 1)) != 0) {
+        std::cout << "Batch size must be a power of 2." << std::endl;
+        return -1; // or any other appropriate error handling
     }
+    if(world_rank == 0)
+        std::cout << "MPI size: " << size << ", thus batch size on each MPI rank: " <<  batch_size << " => " << local_batch_size << std::endl;
     
-    torch::Tensor input = torch::ones({(int)local_batch_size, input_width}).to(torch::kXPU).to(c10::ScalarType::BFloat16);
+    // Create input tensor on rank 0, then distribute to others
+    torch::Tensor input, local_input;
+    if (world_rank == 0) {
+        input = torch::ones({(int)batch_size, input_width}).to(torch::kXPU).to(c10::ScalarType::BFloat16);
+    }
+    else {
+        input = torch::empty({(int)batch_size, input_width}).to(torch::kXPU).to(c10::ScalarType::BFloat16);
+    }
+
+    // Create a buffer to hold the chunk of data that will be received by each rank
+    local_input = torch::empty({(int)local_batch_size, input_width}).to(torch::kXPU).to(c10::ScalarType::BFloat16);
+
+    // Calculate the start and end indices for receiving rank along dimension 0
+    size_t chunk_size = input.size(0) / size;
+    size_t start_index = world_rank * chunk_size;
+    size_t end_index = (world_rank == size - 1) ? input.size(0) : start_index + chunk_size;
+
+    // Broadcast the input tensor from rank 0 to all ranks
+    // TODO: Broadcast might not be the most efficient here
+    const auto begin_time_total = std::chrono::steady_clock::now();
+    ccl::broadcast(input.data_ptr(), batch_size * input_width, dtype, 0, comm, stream).wait();
+
+    local_input.copy_(input.slice(0, start_index, end_index));
+
+    const auto end_time_input = std::chrono::steady_clock::now(); // includes extra overhead from distributing and creating a new local input
+
     torch::Tensor dL_doutput =
         torch::ones({(int)local_batch_size, output_width}).to(torch::kXPU).to(c10::ScalarType::BFloat16);
 
@@ -87,9 +114,23 @@ double benchmark_training(const size_t batch_size, const int n_hidden_layers, co
 
     constexpr int n_iterations_warmup = 5;
     // Do a warmup loop, not benched.
-    //MPI_Barrier(MPI_COMM_WORLD);
+
     for (int iter = 0; iter < n_iterations_warmup; iter++) {
-        train.training_step(input, dL_doutput);
+        auto output_net = train.training_step(local_input, dL_doutput);
+
+        // Reduce gradients across all devices
+        ccl::allreduce(output_net.data_ptr(),
+                    output_net.data_ptr(),
+                    output_net.numel(),
+                    dtype,
+                    ccl::reduction::sum,
+                    comm,
+                    stream,
+                    attr)
+            .wait();
+        MPI_Barrier(MPI_COMM_WORLD);
+        // Average the tensor
+        output_net /= size;
     }
 
     MPI_Barrier(MPI_COMM_WORLD);
@@ -97,34 +138,29 @@ double benchmark_training(const size_t batch_size, const int n_hidden_layers, co
     std::vector<sycl::event> dependencies;
     torch::Tensor output;
     for (int iter = 0; iter < n_iterations; iter++) {
-        output = train.training_step(input, dL_doutput);
+        output = train.training_step(local_input, dL_doutput);
+        // Reduce gradients across all devices
+        ccl::allreduce(output.data_ptr(),
+                    output.data_ptr(),
+                    output.numel(),
+                    dtype,
+                    ccl::reduction::sum,
+                    comm,
+                    stream,
+                    attr)
+            .wait();
+        MPI_Barrier(MPI_COMM_WORLD);
+        // Average the tensor
+        output /= size;
     }
     MPI_Barrier(MPI_COMM_WORLD);
-    
-    // Allreduce the output tensor 
-    ccl::datatype dtype = get_ccl_datatype<T>(); //data.scalar_type()
-    auto attr = ccl::create_operation_attr<ccl::allreduce_attr>();
-
-    // Reduce gradients across all devices
-    ccl::allreduce(output.data_ptr(),
-                   output.data_ptr(),
-                   output.numel(),
-                   dtype,
-                   ccl::reduction::sum,
-                   comm,
-                   stream,
-                   attr)
-        .wait();
-    MPI_Barrier(MPI_COMM_WORLD);
-
-    // Average the tensor
-    output /= size;
 
     // End time to account for training and allreduce + average
     const auto end_time = std::chrono::steady_clock::now();
 
+    auto duration_input = end_time_input - begin_time_total;
     double gflops = tinydpcppnn::benchmarks::common::WritePerformanceDataTraining(
-        begin_time, end_time, batch_size, WIDTH, n_hidden_layers, n_iterations, sizeof(T));
+        begin_time-duration_input, end_time, batch_size, WIDTH, n_hidden_layers, n_iterations, sizeof(T));
 
     MPI_Barrier(MPI_COMM_WORLD);
 

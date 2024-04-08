@@ -344,6 +344,10 @@ template <typename T> class DeviceMatrices {
 
     uint32_t GetNumberOfMatrices() const { return n_matrices_; }
 
+    T* data() const {
+        return matrices_;
+    }
+
     DeviceMatricesView<T> GetViews() const {
         return DeviceMatricesView<T>(n_matrices_, input_m_, input_n_, middle_m_, middle_n_, output_m_, output_n_,
                                      matrices_);
